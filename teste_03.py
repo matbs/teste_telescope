@@ -1,62 +1,64 @@
 import cv2
-import imutils
 import numpy as np
 from picamera2 import Picamera2
 
 def main():
-    # Inicializa a Picamera2
     picam2 = Picamera2()
-    # Para a Lua, precisamos controlar a exposição (para não virar apenas um borrão branco)
+    
+    # Configuração de vídeo
     config = picam2.create_video_configuration(
         main={"size": (640, 480), "format": "BGR888"}
     )
     picam2.configure(config)
     picam2.start()
 
-    # Ajustes de exposição para a Lua (evita que o brilho estoure)
-    # Nota: No Trixie, estes controles são feitos via as propriedades da câmera
-    # controls = {"ExposureTime": 10000, "AnalogueGain": 1.0} 
-    # picam2.set_controls(controls)
+    # --- O PULO DO GATO: CONTROLE DE EXPOSIÇÃO ---
+    # Travamos a câmera para que ela fique "escura". 
+    # Isso elimina ruídos e reflexos.
+    picam2.set_controls({
+        "AeEnable": False,           # Desliga o brilho automático
+        "ExposureTime": 5000,        # 5ms (ajuste se a Lua estiver escura demais)
+        "AnalogueGain": 1.0          # Ganho baixo para evitar ruído (granulação)
+    })
 
-    print("[INFO] Rastreio Lunar Iniciado...")
-    print("[INFO] Pressione 'q' para sair.")
+    print("[INFO] Rastreio Lunar Robusto Iniciado...")
 
     try:
         while True:
             frame = picam2.capture_array()
-            # Converte para tons de cinza para focar no brilho
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             
-            # Aplica um desfoque para remover ruído digital
-            blurred = cv2.GaussianBlur(gray, (9, 9), 0)
+            # Suaviza a imagem para ajudar na detecção de bordas
+            gray = cv2.medianBlur(gray, 5)
 
-            # THRESHOLD: O "pulo do gato". Isolamos apenas os pixels muito brilhantes.
-            # Ajuste o valor 200 se a Lua estiver fraca (nuvens) ou forte.
-            _, thresh = cv2.threshold(blurred, 200, 255, cv2.THRESH_BINARY)
+            # Algoritmo de Hough Circles: Procura por círculos na imagem
+            # dp=1.2, minDist=100 (distância entre duas luas)
+            circles = cv2.HoughCircles(
+                gray, 
+                cv2.HOUGH_GRADIENT, 
+                dp=1.2, 
+                minDist=100,
+                param1=50,   # Sensibilidade de borda
+                param2=30,   # Limiar de detecção (maior = mais rigoroso)
+                minRadius=10, # Tamanho mínimo da lua no frame
+                maxRadius=200 # Tamanho máximo
+            )
 
-            # Encontra os contornos da mancha branca (Lua)
-            cnts = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            cnts = imutils.grab_contours(cnts)
+            if circles is not None:
+                circles = np.uint16(np.around(circles))
+                for i in circles[0, :]:
+                    center = (i[0], i[1])
+                    radius = i[2]
+                    
+                    # Desenha o contorno da Lua (Verde)
+                    cv2.circle(frame, center, radius, (0, 255, 0), 3)
+                    # Desenha o centro (Vermelho)
+                    cv2.circle(frame, center, 2, (0, 0, 255), 3)
+                    
+                    cv2.putText(frame, f"LUA DETECTADA: {center}", (10, 30),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
-            if len(cnts) > 0:
-                # Pega o maior contorno brilhante (presumidamente a Lua)
-                c = max(cnts, key=cv2.contourArea)
-                ((x, y), radius) = cv2.minEnclosingCircle(c)
-                M = cv2.moments(c)
-                
-                # Calcula o centro (Centroide)
-                if M["m00"] > 0:
-                    center = (int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"]))
-
-                    # Só desenha se o "objeto" tiver um tamanho mínimo
-                    if radius > 5:
-                        cv2.circle(frame, (int(x), int(y)), int(radius), (0, 255, 255), 2)
-                        cv2.circle(frame, center, 5, (0, 0, 255), -1)
-                        cv2.putText(frame, f"LUA: {center}", (10, 30), 
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-
-            cv2.imshow("Rastreio Lunar - Pi Camera", frame)
-            # cv2.imshow("Mascara de Brilho", thresh) # Descomente para ver o que a câmera "vê"
+            cv2.imshow("Astro-Tracking Robusto", frame)
 
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 break
