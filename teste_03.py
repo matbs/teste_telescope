@@ -1,71 +1,65 @@
 import cv2
 import imutils
-from ultralytics import YOLO
+import numpy as np
 from picamera2 import Picamera2
 
-# Variáveis globais para o clique
-selected_id = None
-
-def select_object(event, x, y, flags, param):
-    global selected_id
-    if event == cv2.EVENT_LBUTTONDOWN:
-        results = param # Recebe os resultados do YOLO
-        if results and results[0].boxes.id is not None:
-            boxes = results[0].boxes.xyxy.cpu().numpy()
-            ids = results[0].boxes.id.cpu().numpy()
-            for i, box in enumerate(boxes):
-                x1, y1, x2, y2 = box
-                # Verifica se o clique foi dentro de alguma caixa
-                if x1 <= x <= x2 and y1 <= y <= y2:
-                    selected_id = int(ids[i])
-                    print(f"[INFO] Objeto travado! ID: {selected_id}")
-                    break
-
 def main():
-    global selected_id
-    model = YOLO('yolov8n.pt') 
+    # Inicializa a Picamera2
     picam2 = Picamera2()
-    config = picam2.create_video_configuration(main={"size": (640, 480), "format": "BGR888"})
+    # Para a Lua, precisamos controlar a exposição (para não virar apenas um borrão branco)
+    config = picam2.create_video_configuration(
+        main={"size": (640, 480), "format": "BGR888"}
+    )
     picam2.configure(config)
     picam2.start()
 
-    cv2.namedWindow("YOLOv8 Click Tracking")
-    
-    print("[DICA] Clique em um objeto na tela para focar nele.")
-    
+    # Ajustes de exposição para a Lua (evita que o brilho estoure)
+    # Nota: No Trixie, estes controles são feitos via as propriedades da câmera
+    # controls = {"ExposureTime": 10000, "AnalogueGain": 1.0} 
+    # picam2.set_controls(controls)
+
+    print("[INFO] Rastreio Lunar Iniciado...")
+    print("[INFO] Pressione 'q' para sair.")
+
     try:
-        results = None
         while True:
             frame = picam2.capture_array()
-            frame = imutils.resize(frame, width=640)
-
-            # Define a função de clique e passa os resultados atuais
-            cv2.setMouseCallback("YOLOv8 Click Tracking", select_object, param=results)
-
-            results = model.track(frame, persist=True, conf=0.3, verbose=False)
-
-            if results[0].boxes.id is not None:
-                boxes = results[0].boxes.xyxy.cpu().numpy()
-                ids = results[0].boxes.id.cpu().numpy()
-                
-                for i, box in enumerate(boxes):
-                    obj_id = int(ids[i])
-                    x1, y1, x2, y2 = map(int, box)
-                    
-                    # Se não selecionamos nada, mostra todos. 
-                    # Se selecionamos, destaca apenas o escolhido.
-                    if selected_id is None or obj_id == selected_id:
-                        color = (0, 255, 0) if obj_id == selected_id else (255, 0, 0)
-                        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                        cv2.putText(frame, f"ID: {obj_id}", (x1, y1 - 10), 
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-
-            cv2.imshow("YOLOv8 Click Tracking", frame)
+            # Converte para tons de cinza para focar no brilho
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord("q"): break
-            if key == ord("r"): selected_id = None # 'r' para resetar a seleção
+            # Aplica um desfoque para remover ruído digital
+            blurred = cv2.GaussianBlur(gray, (9, 9), 0)
 
+            # THRESHOLD: O "pulo do gato". Isolamos apenas os pixels muito brilhantes.
+            # Ajuste o valor 200 se a Lua estiver fraca (nuvens) ou forte.
+            _, thresh = cv2.threshold(blurred, 200, 255, cv2.THRESH_BINARY)
+
+            # Encontra os contornos da mancha branca (Lua)
+            cnts = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cnts = imutils.grab_contours(cnts)
+
+            if len(cnts) > 0:
+                # Pega o maior contorno brilhante (presumidamente a Lua)
+                c = max(cnts, key=cv2.contourArea)
+                ((x, y), radius) = cv2.minEnclosingCircle(c)
+                M = cv2.moments(c)
+                
+                # Calcula o centro (Centroide)
+                if M["m00"] > 0:
+                    center = (int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"]))
+
+                    # Só desenha se o "objeto" tiver um tamanho mínimo
+                    if radius > 5:
+                        cv2.circle(frame, (int(x), int(y)), int(radius), (0, 255, 255), 2)
+                        cv2.circle(frame, center, 5, (0, 0, 255), -1)
+                        cv2.putText(frame, f"LUA: {center}", (10, 30), 
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+
+            cv2.imshow("Rastreio Lunar - Pi Camera", frame)
+            # cv2.imshow("Mascara de Brilho", thresh) # Descomente para ver o que a câmera "vê"
+
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                break
     finally:
         picam2.stop()
         cv2.destroyAllWindows()
