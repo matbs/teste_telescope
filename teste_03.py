@@ -1,68 +1,85 @@
 import cv2
+import imutils
 import numpy as np
 from picamera2 import Picamera2
 
 def main():
+    # 1. Inicialização da Picamera2
     picam2 = Picamera2()
-    
-    # Configuração de vídeo
     config = picam2.create_video_configuration(
         main={"size": (640, 480), "format": "BGR888"}
     )
     picam2.configure(config)
     picam2.start()
 
-    # --- O PULO DO GATO: CONTROLE DE EXPOSIÇÃO ---
-    # Travamos a câmera para que ela fique "escura". 
-    # Isso elimina ruídos e reflexos.
+    # 2. Configurações Manuais de Exposição (Crucial para a Lua)
+    # Baixamos o tempo de exposição e o ganho para ver detalhes e não um borrão
+    # Esses valores podem precisar de ajuste fino dependendo da fase da lua
     picam2.set_controls({
-        "AeEnable": False,           # Desliga o brilho automático
-        "ExposureTime": 5000,        # 5ms (ajuste se a Lua estiver escura demais)
-        "AnalogueGain": 1.0          # Ganho baixo para evitar ruído (granulação)
+        "ExposureTime": 5000,  # Em microsegundos (ajuste entre 2000 e 10000)
+        "AnalogueGain": 1.0,    # Ganho baixo para evitar ruído
+        "AeEnable": False       # Desativa o auto-exposição
     })
 
-    print("[INFO] Rastreio Lunar Robusto Iniciado...")
+    print("[INFO] Rastreio Lunar Otimizado Iniciado...")
+    print("[INFO] Pressione 'q' para sair.")
 
     try:
         while True:
+            # Captura o frame
             frame = picam2.capture_array()
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             
-            # Suaviza a imagem para ajudar na detecção de bordas
-            gray = cv2.medianBlur(gray, 5)
+            # Pré-processamento
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            blurred = cv2.GaussianBlur(gray, (11, 11), 0)
 
-            # Algoritmo de Hough Circles: Procura por círculos na imagem
-            # dp=1.2, minDist=100 (distância entre duas luas)
-            circles = cv2.HoughCircles(
-                gray, 
-                cv2.HOUGH_GRADIENT, 
-                dp=1.2, 
-                minDist=100,
-                param1=50,   # Sensibilidade de borda
-                param2=30,   # Limiar de detecção (maior = mais rigoroso)
-                minRadius=10, # Tamanho mínimo da lua no frame
-                maxRadius=200 # Tamanho máximo
-            )
+            # Threshold adaptativo ou simples (ajuste o valor 200 conforme necessário)
+            _, thresh = cv2.threshold(blurred, 180, 255, cv2.THRESH_BINARY)
+            
+            # Limpeza morfológica para remover ruídos menores
+            mask = cv2.erode(thresh, None, iterations=2)
+            mask = cv2.dilate(mask, None, iterations=2)
 
-            if circles is not None:
-                circles = np.uint16(np.around(circles))
-                for i in circles[0, :]:
-                    center = (i[0], i[1])
-                    radius = i[2]
-                    
-                    # Desenha o contorno da Lua (Verde)
-                    cv2.circle(frame, center, radius, (0, 255, 0), 3)
-                    # Desenha o centro (Vermelho)
-                    cv2.circle(frame, center, 2, (0, 0, 255), 3)
-                    
-                    cv2.putText(frame, f"LUA DETECTADA: {center}", (10, 30),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            # Encontra contornos
+            cnts = cv2.findContours(mask.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cnts = imutils.grab_contours(cnts)
 
-            cv2.imshow("Astro-Tracking Robusto", frame)
+            if len(cnts) > 0:
+                # Filtra pelo maior contorno
+                c = max(cnts, key=cv2.contourArea)
+                area = cv2.contourArea(c)
+                ((x, y), radius) = cv2.minEnclosingCircle(c)
+                
+                # Cálculo de Circularidade (Lua cheia/quarto crescente são formas definidas)
+                # area_circulo_teorico = pi * r^2
+                circularity = area / (np.pi * (radius ** 2))
+
+                # Filtro: Apenas objetos com tamanho mínimo e relativamente redondos
+                if radius > 10 and circularity > 0.4:
+                    M = cv2.moments(c)
+                    if M["m00"] > 0:
+                        cX = int(M["m10"] / M["m00"])
+                        cY = int(M["m01"] / M["m00"])
+
+                        # Desenha a marcação
+                        cv2.circle(frame, (int(x), int(y)), int(radius), (0, 255, 0), 2)
+                        cv2.drawMarker(frame, (cX, cY), (0, 0, 255), cv2.MARKER_CROSS, 15, 2)
+                        
+                        # Info na tela
+                        cv2.putText(frame, f"LUA DETECTADA", (cX - 50, int(y - radius - 10)),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                        cv2.putText(frame, f"Coord: {cX}, {cY}", (10, 450),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+
+            # Exibição
+            cv2.imshow("Monitoramento Lunar", frame)
+            # cv2.imshow("Mascara", mask) # Debug
 
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 break
+
     finally:
+        print("[INFO] Encerrando...")
         picam2.stop()
         cv2.destroyAllWindows()
 
